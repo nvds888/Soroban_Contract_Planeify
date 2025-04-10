@@ -1,0 +1,139 @@
+#![no_std]
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec, Symbol, Error};
+
+#[contract]
+pub struct UserSpotRegistry;
+
+#[contracttype]
+#[derive(Clone)]
+pub struct SpotRecord {
+    spot_id: String,  // Database reference ID
+    timestamp: u64,   // Unix timestamp
+}
+
+#[contractimpl]
+impl UserSpotRegistry {
+    /// Initialize contract with user ID and admin address
+    pub fn initialize(env: Env, user_id: String, admin: Address) -> Result<(), Error> {
+        // Check if already initialized
+        if env.storage().instance().has(&Symbol::new(&env, "admin")) {
+            return Err(Error::from_contract_error(1)); // Already initialized
+        }
+        
+        // Store initialization data
+        env.storage().instance().set(&Symbol::new(&env, "user_id"), &user_id);
+        env.storage().instance().set(&Symbol::new(&env, "admin"), &admin);
+        env.storage().instance().set(&Symbol::new(&env, "spot_count"), &0u64);
+        
+        // Initialize empty spots list
+        let spots: Vec<SpotRecord> = Vec::new(&env);
+        env.storage().persistent().set(&Symbol::new(&env, "spots"), &spots);
+        
+        Ok(())
+    }
+    
+    /// Record a new spot (admin only)
+    pub fn record_spot(env: Env, spot_id: String, timestamp: u64) -> Result<u64, Error> {
+        // Validation
+        if spot_id.len() > 64 {
+            return Err(Error::from_contract_error(2)); // Spot ID too long
+        }
+        if timestamp > env.ledger().timestamp() + 3600 {
+            return Err(Error::from_contract_error(3)); // Invalid timestamp
+        }
+        
+        // Get current count
+        let mut count: u64 = env.storage().instance().get(&Symbol::new(&env, "spot_count")).unwrap_or(0);
+        count += 1;
+        
+        // Create and store the spot
+        let spot = SpotRecord { spot_id, timestamp };
+        let mut spots: Vec<SpotRecord> = env.storage().persistent().get(&Symbol::new(&env, "spots")).unwrap_or(Vec::new(&env));
+        spots.push_back(spot);
+        
+        // Update storage
+        env.storage().persistent().set(&Symbol::new(&env, "spots"), &spots);
+        env.storage().instance().set(&Symbol::new(&env, "spot_count"), &count);
+        
+        Ok(count)
+    }
+    
+    /// Get the total number of recorded spots
+    pub fn get_spot_count(env: Env) -> u64 {
+        env.storage().instance().get(&Symbol::new(&env, "spot_count")).unwrap_or(0)
+    }
+    
+    /// Get the user ID associated with this contract
+    pub fn get_user_id(env: Env) -> Result<String, Error> {
+        env.storage().instance().get(&Symbol::new(&env, "user_id"))
+            .ok_or_else(|| Error::from_contract_error(4)) // Not initialized
+    }
+    
+    /// Get all spots
+    pub fn get_spots(env: Env) -> Vec<SpotRecord> {
+        env.storage().persistent().get(&Symbol::new(&env, "spots")).unwrap_or(Vec::new(&env))
+    }
+    
+    /// Get the admin address
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage().instance().get(&Symbol::new(&env, "admin"))
+            .ok_or_else(|| Error::from_contract_error(4)) // Not initialized
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Env};
+
+    #[test]
+    fn test_initialize() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, UserSpotRegistry);
+        let client = UserSpotRegistryClient::new(&env, &contract_id);
+        
+        let admin = Address::random(&env);
+        
+        // Initialize contract
+        client.initialize(&String::from_str(&env, "user123"), &admin);
+        
+        // Verify user ID
+        let user_id = client.get_user_id();
+        assert_eq!(user_id, String::from_str(&env, "user123"));
+        
+        // Verify admin
+        let stored_admin = client.get_admin();
+        assert_eq!(stored_admin, admin);
+        
+        // Verify spot count starts at 0
+        let count = client.get_spot_count();
+        assert_eq!(count, 0);
+    }
+    
+    #[test]
+    fn test_record_spot() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, UserSpotRegistry);
+        let client = UserSpotRegistryClient::new(&env, &contract_id);
+        
+        let admin = Address::random(&env);
+        
+        // Initialize contract
+        client.initialize(&String::from_str(&env, "user123"), &admin);
+        
+        // Record a spot
+        let timestamp = 1234567890;
+        let count = client.record_spot(&String::from_str(&env, "spot1"), &timestamp);
+        assert_eq!(count, 1);
+        
+        // Verify spot count increased
+        let new_count = client.get_spot_count();
+        assert_eq!(new_count, 1);
+        
+        // Verify spot is stored
+        let spots = client.get_spots();
+        assert_eq!(spots.len(), 1);
+        assert_eq!(spots.get(0).unwrap().spot_id, String::from_str(&env, "spot1"));
+        assert_eq!(spots.get(0).unwrap().timestamp, timestamp);
+    }
+}
